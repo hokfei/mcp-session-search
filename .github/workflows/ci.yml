@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # llama-cpp-python ships no wheels on PyPI - only a source tarball - so a
+      # plain install compiles it, which needs cmake and a C toolchain. The
+      # prebuilt CPU wheels avoid that entirely.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]" \
+            --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+
+      # Contract tests drive a real server, which loads the embedding model.
+      # It is gitignored, so CI has to fetch it.
+      - name: Fetch the embedding model
+        run: |
+          mkdir -p "$HOME/models"
+          curl -sSL -o "$HOME/models/bge-small-en-v1.5-q8_0.gguf" \
+            https://huggingface.co/ggml-org/bge-small-en-v1.5-Q8_0-GGUF/resolve/main/bge-small-en-v1.5-q8_0.gguf
+          ls -la "$HOME/models"
+
+      - name: Lint
+        run: python -m ruff check src tests
+
+      - name: Check formatting
+        run: python -m ruff format --check src tests
+
+      - name: Unit tests
+        run: python -m pytest tests/unit -q
+
+      - name: Contract tests
+        run: python -m pytest tests/contract -q
+
+  # Confirms the package installs and imports cleanly on its own, without the
+  # editable checkout - catches packaging mistakes that tests cannot.
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build a wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+
+      - name: Install the wheel into a clean environment
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --upgrade pip
+          /tmp/smoke/bin/pip install dist/*.whl \
+            --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+
+      - name: Import and run
+        run: /tmp/smoke/bin/python -m session_search --help

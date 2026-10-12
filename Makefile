@@ -1,15 +1,23 @@
 # Session Search MCP - development tasks.
+#
+# Portable across platforms: no rm/rmdir/for-loop syntax, and PYTHON can be
+# overridden for a virtualenv interpreter.
+#
+#   make PYTHON=.venv/Scripts/python.exe test     (Windows)
+#   make test                                     (POSIX, with an active venv)
+#
 # Run `make help` for the list.
 
-PYTHON := .venv/Scripts/python.exe
-VENV   := .venv
+PYTHON ?= python
+VENV   ?= .venv
 
-.PHONY: help install install-gpu test test-unit test-contract check lint format typecheck run verify calibrate index health clean
+.PHONY: help install install-gpu test test-unit test-contract check lint format \
+        typecheck run verify calibrate index health clean
 
 help:
 	@echo "Session Search MCP"
 	@echo ""
-	@echo "  make install      Install dependencies into .venv"
+	@echo "  make install      Install dependencies"
 	@echo "  make install-gpu  Install with CUDA support"
 	@echo ""
 	@echo "  make test         Run all tests"
@@ -18,6 +26,7 @@ help:
 	@echo ""
 	@echo "  make lint         Lint with ruff"
 	@echo "  make format       Auto-fix lint and apply ruff formatting"
+	@echo "  make typecheck    Type-check with mypy"
 	@echo "  make check        Lint, typecheck, and unit tests"
 	@echo ""
 	@echo "  make verify       Check the mcp.json wiring end to end"
@@ -26,14 +35,11 @@ help:
 	@echo "  make health       Print a health report"
 	@echo "  make clean        Remove caches and build artifacts"
 
-$(VENV):
-	py -3.12 -m venv $(VENV)
-
-install: $(VENV)
+install:
 	$(PYTHON) -m pip install --upgrade pip
 	$(PYTHON) -m pip install -e ".[dev]"
 
-install-gpu: $(VENV)
+install-gpu:
 	$(PYTHON) -m pip install --upgrade pip
 	$(PYTHON) -m pip install -e ".[dev,gpu]"
 
@@ -58,11 +64,11 @@ typecheck:
 
 check: lint typecheck test-unit
 
-# Starts the server on stdio; expect it to wait for input.
+# Serves over stdio; expects to wait for input.
 run:
 	PYTHONPATH=src $(PYTHON) -m session_search
 
-# Confirms OpenCode can actually reach the server as configured.
+# Confirms a client can actually reach the server as configured.
 verify:
 	$(PYTHON) verify_mcp_config.py
 
@@ -75,5 +81,6 @@ index:
 health:
 	PYTHONPATH=src $(PYTHON) -m session_search health
 
+# Done in Python so it behaves the same on every platform.
 clean:
-	$(PYTHON) -c "import shutil, pathlib; [shutil.rmtree(p, ignore_errors=True) for p in map(pathlib.Path, ['build', 'dist', 'htmlcov', '.pytest_cache', '.mypy_cache', '.ruff_cache'])]; [shutil.rmtree(p, ignore_errors=True) for p in pathlib.Path('.').rglob('__pycache__')]"
+	$(PYTHON) -c "import shutil,pathlib; [shutil.rmtree(p, ignore_errors=True) for p in map(pathlib.Path, ['build','dist','htmlcov','.pytest_cache','.mypy_cache','.ruff_cache'])]; [shutil.rmtree(p, ignore_errors=True) for p in pathlib.Path('.').rglob('__pycache__')]; pathlib.Path('.coverage').unlink(missing_ok=True)"
