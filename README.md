@@ -3,7 +3,7 @@
 Semantic search across your OpenCode conversation history.
 
 OpenCode already stores every session you have ever had. This server reads that
-database, embeds each session, and lets the assistant search it by meaning - so
+database, embeds each session, and lets the assistant search it by meaning — so
 it can recall what you decided in a past session instead of asking you to repeat
 it. Nothing needs to be logged by hand.
 
@@ -11,9 +11,9 @@ it. Nothing needs to be logged by hand.
 
 ```
 opencode.db ──read──▶ messages ──chunk──▶ embed each ──▶ session_search.db
-  (source of truth)    (1200 chars)    (bge-small)        (281 chunks)
+   (source of truth)    (1200 chars)    (bge-small)        (your index)
 
-   query ──embed──▶ score every chunk ──▶ best chunk per session ──▶ answer
+query ──embed──▶ score every chunk ──▶ best chunk per session ──▶ answer
 ```
 
 Everything runs locally. No API keys, no network calls.
@@ -50,28 +50,32 @@ matches, which is honest about what it is rather than improvising one.
 Requires Python 3.11+ and a GGUF embedding model.
 
 ```bash
-# 1. Get an embedding model
+# 1. Get an embedding model (bge-small-en-v1.5, 384-dim, ~36 MB)
 mkdir -p ~/models
 curl -L -o ~/models/bge-small-en-v1.5-q8_0.gguf \
   https://huggingface.co/ggml-org/bge-small-en-v1.5-Q8_0-GGUF/resolve/main/bge-small-en-v1.5-q8_0.gguf
 
 # 2. Install
 python -m venv .venv
-.\.venv\Scripts\python -m pip install -e ".[dev]"
+.venv/bin/python -m pip install -e ".[dev]"
+# or on Windows:
+.venv\Scripts\python -m pip install -e ".[dev]"
 ```
 
 Register it with OpenCode in `~/.opencode/mcp.json`:
 
 ```json
 "session-search": {
-  "command": "C:\\Users\\you\\opencode-tools\\mcp-session-search\\.venv\\Scripts\\python.exe",
+  "command": "/path/to/mcp-session-search/.venv/bin/python",
   "args": ["-m", "session_search"],
   "env": {
-    "SESSION_SEARCH_MODEL_PATH": "C:\\Users\\you\\models\\bge-small-en-v1.5-q8_0.gguf",
+    "SESSION_SEARCH_MODEL_PATH": "/path/to/models/bge-small-en-v1.5-q8_0.gguf",
     "SESSION_SEARCH_MODEL_N_GPU_LAYERS": "0"
   }
 }
 ```
+
+Adjust paths for your system (use forward slashes on Unix, backslashes on Windows; `~` expands to your home directory).
 
 Verify the wiring end to end:
 
@@ -95,6 +99,7 @@ file. See `.env.example` for the full list. The ones that matter:
 | `SIMILARITY_THRESHOLD` | `0.60` | Calibrated; see ADR 005 and `calibrate.py`. |
 | `MODEL_N_GPU_LAYERS` | `0` | `0` is fine; the model is 36 MB. |
 | `CHAT_MODEL_PATH` | unset | Optional. Enables written answers. |
+| `INCLUDE_ARCHIVED_SESSIONS` | `false` | Whether to index sessions archived in OpenCode. |
 
 ## Layout
 
@@ -137,3 +142,7 @@ cleanly, which deadlocks instead of failing.
 - [ADR 004](docs/adr/004-read-from-opencode-database.md) - why we read rather than store
 - [ADR 005](docs/adr/005-embedding-model-and-search.md) - embeddings and vector search
 - [ADR 006](docs/adr/006-chunked-indexing.md) - why sessions are chunked
+
+## License
+
+MIT
