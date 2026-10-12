@@ -28,8 +28,15 @@ CONVERSATIONAL_TYPES = ("user", "assistant", "system")
 _SESSION_COLUMNS = """
     id, title, directory, project_id, version,
     agent, model, time_created, time_updated,
-    tokens_input, tokens_output, cost
+    tokens_input, tokens_output, cost, time_archived
 """
+
+# OpenCode soft-archives rather than deleting: removing a session from the list
+# stamps time_archived and leaves the row and its messages in place. Archived
+# sessions are excluded unless explicitly requested, because a session the user
+# removed should stop being recallable.
+_ARCHIVED_FILTER = "AND time_archived IS NULL"
+_ARCHIVED_FILTER_SELECT = "CASE WHEN time_archived IS NULL THEN 0 ELSE 1 END AS archived"
 
 
 class OpenCodeReader:
@@ -63,8 +70,12 @@ class OpenCodeReader:
         limit: int = 50,
         offset: int = 0,
         directory: str | None = None,
+        include_archived: bool = False,
     ) -> Result[tuple[SessionRecord, ...], RepositoryError]:
-        """List sessions across both schema generations, newest first."""
+        """List sessions across both schema generations, newest first.
+
+        Archived sessions are omitted unless `include_archived` is set.
+        """
         try:
             with self._conn() as conn:
                 # Over-fetch per table, then dedupe, sort and page in Python so
@@ -72,27 +83,22 @@ class OpenCodeReader:
                 fetch = limit + offset
                 rows: list[sqlite3.Row] = []
 
-                if self._has_table(conn, "session_v2"):
-                    rows.extend(
-                        conn.execute(
-                            f"""
-                            SELECT {_SESSION_COLUMNS}, {_COUNT_V2} AS message_count
-                            FROM session_v2
-                            WHERE (? IS NULL OR directory = ?)
-                            ORDER BY time_updated DESC
-                            LIMIT ?
-                            """,
-                            (directory, directory, fetch),
-                        ).fetchall()
-                    )
+                for table, count_expr in (
+                    ("session_v2", _COUNT_V2),
+                    ("session", _COUNT_LEGACY),
+                ):
+                    if not self._has_table(conn, table):
+                        continue
 
-                if self._has_table(conn, "session"):
+                    archive_clause = "" if include_archived else _ARCHIVED_FILTER
                     rows.extend(
                         conn.execute(
                             f"""
-                            SELECT {_SESSION_COLUMNS}, {_COUNT_LEGACY} AS message_count
-                            FROM session
-                            WHERE (? IS NULL OR directory = ?)
+                            SELECT {_SESSION_COLUMNS},
+                                   {_ARCHIVED_FILTER_SELECT},
+                                   {count_expr} AS message_count
+                            FROM {table}
+                            WHERE (? IS NULL OR directory = ?) {archive_clause}
                             ORDER BY time_updated DESC
                             LIMIT ?
                             """,
@@ -109,7 +115,11 @@ class OpenCodeReader:
             return Result.err(RepositoryError(f"Failed to list sessions: {e}", e))
 
     async def get_session(self, session_id: str) -> Result[SessionRecord, RepositoryError]:
-        """Get one session by ID from either schema generation."""
+        """Get one session by ID from either schema generation.
+
+        Archived sessions are still returned: if the caller already has the ID,
+        hiding it would be surprising. Search excludes them.
+        """
         try:
             with self._conn() as conn:
                 for table, count_expr in (
@@ -122,6 +132,7 @@ class OpenCodeReader:
                     row = conn.execute(
                         f"""
                         SELECT {_SESSION_COLUMNS},
+                               {_ARCHIVED_FILTER_SELECT},
                                {count_expr} AS message_count
                         FROM {table}
                         WHERE id = ?
@@ -205,6 +216,7 @@ class OpenCodeReader:
         self,
         timestamp_ms: int,
         limit: int = 500,
+        include_archived: bool = False,
     ) -> Result[tuple[SessionRecord, ...], RepositoryError]:
         """Get sessions updated at or after a timestamp, oldest first.
 
@@ -219,27 +231,28 @@ class OpenCodeReader:
         try:
             with self._conn() as conn:
                 rows: list[sqlite3.Row] = []
+                archive_clause = "" if include_archived else _ARCHIVED_FILTER
 
-                queries = []
-                if self._has_table(conn, "session_v2"):
-                    queries.append(
-                        (
-                            f"SELECT {_SESSION_COLUMNS}, {_COUNT_V2} AS message_count FROM session_v2 WHERE time_updated >= ? ORDER BY time_updated ASC LIMIT ?",
-                            timestamp_ms,
-                            limit,
-                        )
+                for table, count_expr in (
+                    ("session_v2", _COUNT_V2),
+                    ("session", _COUNT_LEGACY),
+                ):
+                    if not self._has_table(conn, table):
+                        continue
+                    rows.extend(
+                        conn.execute(
+                            f"""
+                            SELECT {_SESSION_COLUMNS},
+                                   {_ARCHIVED_FILTER_SELECT},
+                                   {count_expr} AS message_count
+                            FROM {table}
+                            WHERE time_updated >= ? {archive_clause}
+                            ORDER BY time_updated ASC
+                            LIMIT ?
+                            """,
+                            (timestamp_ms, limit),
+                        ).fetchall()
                     )
-                if self._has_table(conn, "session"):
-                    queries.append(
-                        (
-                            f"SELECT {_SESSION_COLUMNS}, {_COUNT_LEGACY} AS message_count FROM session WHERE time_updated >= ? ORDER BY time_updated ASC LIMIT ?",
-                            timestamp_ms,
-                            limit,
-                        )
-                    )
-
-                for sql, since, cap in queries:
-                    rows.extend(conn.execute(sql, (since, cap)).fetchall())
 
                 records = _dedupe(self._to_session(r) for r in rows)
 
@@ -250,23 +263,43 @@ class OpenCodeReader:
             return Result.err(RepositoryError(f"Failed to get recent sessions: {e}", e))
 
     async def count_sessions(self) -> Result[int, RepositoryError]:
-        """Total sessions across both schema generations.
+        """Count sessions across both schema generations, excluding archived.
 
         IDs may appear in both tables during a migration, so this reports the
         union rather than a naive sum.
         """
+        ids = await self.get_all_session_ids()
+        if not ids.is_ok:
+            return Result.err(ids.error)
+        return Result.ok(len(ids.value))
+
+    async def get_all_session_ids(
+        self, include_archived: bool = False
+    ) -> Result[set[str], RepositoryError]:
+        """Every session ID currently stored, for reconciling the index.
+
+        Used to drop index entries whose session no longer exists, which would
+        otherwise linger forever with nothing able to remove them.
+        """
         try:
             with self._conn() as conn:
                 ids: set[str] = set()
+                archive_clause = "" if include_archived else _ARCHIVED_FILTER
 
                 for table in ("session_v2", "session"):
-                    if self._has_table(conn, table):
-                        ids.update(row[0] for row in conn.execute(f"SELECT id FROM {table}"))
+                    if not self._has_table(conn, table):
+                        continue
+                    ids.update(
+                        row[0]
+                        for row in conn.execute(
+                            f"SELECT id FROM {table} WHERE 1=1 {archive_clause}"
+                        )
+                    )
 
-                return Result.ok(len(ids))
+                return Result.ok(ids)
 
         except Exception as e:
-            return Result.err(RepositoryError(f"Failed to count sessions: {e}", e))
+            return Result.err(RepositoryError(f"Failed to list session IDs: {e}", e))
 
     async def get_directories(self) -> Result[tuple[str, ...], RepositoryError]:
         """Project directories that contain sessions."""
@@ -316,6 +349,7 @@ class OpenCodeReader:
             tokens_input=row["tokens_input"] or 0,
             tokens_output=row["tokens_output"] or 0,
             cost=row["cost"] or 0.0,
+            archived=bool(row["archived"]) if "archived" in row.keys() else False,
         )
 
     def _to_message(self, row: sqlite3.Row) -> MessageRecord | None:

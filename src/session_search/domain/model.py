@@ -28,6 +28,7 @@ class SessionRecord:
     tokens_input: int
     tokens_output: int
     cost: float
+    archived: bool = False
 
     @property
     def created_at(self) -> datetime:
@@ -111,12 +112,15 @@ class IndexStats:
     skipped: int
     found: int
     chunks: int = 0
+    pruned: int = 0
 
     @property
     def summary(self) -> str:
         text = f"Indexed {self.indexed} of {self.found} sessions ({self.skipped} skipped)."
         if self.chunks:
             text += f" {self.chunks} chunks."
+        if self.pruned:
+            text += f" Removed {self.pruned} no longer in OpenCode."
         return text
 
 

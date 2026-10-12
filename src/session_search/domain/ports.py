@@ -61,12 +61,19 @@ class SessionSource(Protocol):
         self,
         timestamp_ms: int,
         limit: int = 500,
+        include_archived: bool = False,
     ) -> Result[tuple[SessionRecord, ...], RepositoryError]:
         """Get sessions updated after a timestamp, for incremental indexing."""
         ...
 
     async def count_sessions(self) -> Result[int, RepositoryError]:
-        """Total number of sessions available."""
+        """Total number of sessions available, excluding archived."""
+        ...
+
+    async def get_all_session_ids(
+        self, include_archived: bool = False
+    ) -> Result[set[str], RepositoryError]:
+        """Every session ID currently stored, for reconciling the index."""
         ...
 
     async def get_directories(self) -> Result[tuple[str, ...], RepositoryError]:
@@ -108,6 +115,17 @@ class VectorStore(Protocol):
 
     async def get_last_indexed_time(self) -> Result[int, RepositoryError]:
         """Newest time_updated across indexed sessions."""
+        ...
+
+    async def remove(self, session_id: str) -> Result[None, RepositoryError]:
+        """Delete one session and all of its chunk vectors."""
+        ...
+
+    async def prune_missing(self, live_ids: set[str]) -> Result[int, RepositoryError]:
+        """Drop index entries whose sessions no longer exist.
+
+        Returns the number of sessions removed.
+        """
         ...
 
     async def count(self) -> Result[int, RepositoryError]:

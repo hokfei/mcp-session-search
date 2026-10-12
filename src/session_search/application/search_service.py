@@ -141,13 +141,22 @@ class SessionSearchService:
         force: bool,
     ) -> Result[IndexStats, RepositoryError]:
         """Run one indexing pass over sessions changed since a timestamp."""
-        sessions_result = await self.source.get_sessions_since(since_timestamp, limit)
+        # Reconcile first: our database holds a copy of the conversation, so a
+        # session removed from OpenCode must not linger here. Archived sessions
+        # are excluded from `live_ids` and pruned along with deleted ones.
+        pruned = await self.reconcile()
+
+        sessions_result = await self.source.get_sessions_since(
+            since_timestamp,
+            limit,
+            include_archived=settings.include_archived_sessions,
+        )
         if not sessions_result.is_ok:
             return Result.err(sessions_result.error)
 
         sessions = sessions_result.value
         if not sessions:
-            return Result.ok(IndexStats(indexed=0, skipped=0, found=0, chunks=0))
+            return Result.ok(IndexStats(indexed=0, skipped=0, found=0, chunks=0, pruned=pruned))
 
         already: set[str] = set()
         if not force:
@@ -166,18 +175,52 @@ class SessionSearchService:
                 continue
 
             result = await self.index_session(session)
-            if result.is_ok:
+            if not result.is_ok:
+                skipped += 1
+                logger.warning("Indexing %s failed: %s", session.id, result.error)
+            elif result.value.indexed:
                 indexed += 1
                 chunks_written += result.value.chunks
             else:
+                # Nothing renderable to embed; do not claim it was indexed.
                 skipped += 1
-                logger.warning("Indexing %s failed: %s", session.id, result.error)
 
         stats = IndexStats(
-            indexed=indexed, skipped=skipped, found=len(sessions), chunks=chunks_written
+            indexed=indexed,
+            skipped=skipped,
+            found=len(sessions),
+            chunks=chunks_written,
+            pruned=pruned,
         )
         logger.info("Index pass: %s", stats.summary)
         return Result.ok(stats)
+
+    async def reconcile(self) -> int:
+        """Drop index entries for sessions that are gone or archived.
+
+        Returns how many were removed. Failures are logged and swallowed: a
+        stale index still answers searches, and a reconciliation error should
+        not stop indexing.
+        """
+        live_result = await self.source.get_all_session_ids(
+            include_archived=settings.include_archived_sessions
+        )
+        if not live_result.is_ok:
+            logger.warning("Could not list session IDs: %s", live_result.error)
+            return 0
+
+        pruned = await self.store.prune_missing(live_result.value)
+        if not pruned.is_ok:
+            logger.warning("Reconciliation failed: %s", pruned.error)
+            return 0
+
+        if pruned.value:
+            logger.info("Pruned %d session(s) no longer in OpenCode", pruned.value)
+        return pruned.value
+
+    async def forget_session(self, session_id: str) -> Result[None, RepositoryError]:
+        """Remove one session from the index immediately."""
+        return await self.store.remove(session_id)
 
     # ==================== Search ====================
 

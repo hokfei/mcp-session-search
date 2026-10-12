@@ -113,8 +113,11 @@ class FakeSource:
         limit: int = 50,
         offset: int = 0,
         directory: str | None = None,
+        include_archived: bool = False,
     ) -> Result[tuple[SessionRecord, ...], object]:
         rows = [s for s in self.sessions if directory is None or s.directory == directory]
+        if not include_archived:
+            rows = [s for s in rows if not s.archived]
         rows.sort(key=lambda s: s.time_updated, reverse=True)
         return Result.ok(tuple(rows[offset : offset + limit]))
 
@@ -138,16 +141,20 @@ class FakeSource:
         return Result.ok(text[:max_chars])
 
     async def get_sessions_since(
-        self, timestamp_ms: int, limit: int = 500
+        self, timestamp_ms: int, limit: int = 500, include_archived: bool = False
     ) -> Result[tuple[SessionRecord, ...], object]:
-        rows = sorted(
-            (s for s in self.sessions if s.time_updated > timestamp_ms),
-            key=lambda s: s.time_updated,
-        )
+        rows = [s for s in self.sessions if s.time_updated > timestamp_ms]
+        if not include_archived:
+            rows = [s for s in rows if not s.archived]
+        rows.sort(key=lambda s: s.time_updated)
         return Result.ok(tuple(rows[:limit]))
 
     async def count_sessions(self) -> Result[int, object]:
-        return Result.ok(len(self.sessions))
+        return Result.ok(len([s for s in self.sessions if not s.archived]))
+
+    async def get_all_session_ids(self, include_archived: bool = False) -> Result[set[str], object]:
+        ids = {s.id for s in self.sessions if include_archived or not s.archived}
+        return Result.ok(ids)
 
     async def get_directories(self) -> Result[tuple[str, ...], object]:
         return Result.ok(tuple(sorted({s.directory for s in self.sessions if s.directory})))
@@ -240,6 +247,16 @@ class FakeStore:
     async def count(self) -> Result[int, object]:
         return Result.ok(len(self.records))
 
+    async def remove(self, session_id: str) -> Result[None, object]:
+        self.records.pop(session_id, None)
+        return Result.ok(None)
+
+    async def prune_missing(self, live_ids: set[str]) -> Result[int, object]:
+        orphans = set(self.records) - live_ids
+        for session_id in orphans:
+            del self.records[session_id]
+        return Result.ok(len(orphans))
+
     async def clear(self) -> Result[None, object]:
         self.records.clear()
         return Result.ok(None)
@@ -255,6 +272,7 @@ def make_session(
     time_created: int = 1_700_000_000_000,
     time_updated: int | None = None,
     message_count: int = 2,
+    archived: bool = False,
 ) -> SessionRecord:
     """Build a SessionRecord with sensible defaults."""
     return SessionRecord(
@@ -271,6 +289,7 @@ def make_session(
         tokens_input=100,
         tokens_output=200,
         cost=0.0012,
+        archived=archived,
     )
 
 
@@ -309,7 +328,8 @@ CREATE TABLE session_v2 (
     time_updated INTEGER,
     tokens_input INTEGER,
     tokens_output INTEGER,
-    cost REAL
+    cost REAL,
+    time_archived INTEGER
 );
 CREATE TABLE session_message (
     id TEXT PRIMARY KEY,
@@ -334,7 +354,8 @@ CREATE TABLE session (
     time_updated INTEGER,
     tokens_input INTEGER,
     tokens_output INTEGER,
-    cost REAL
+    cost REAL,
+    time_archived INTEGER
 );
 CREATE TABLE message (
     id TEXT PRIMARY KEY,
@@ -350,8 +371,8 @@ def _insert_session(conn: sqlite3.Connection, table: str, session: SessionRecord
         f"""
         INSERT INTO {table}
         (id, title, directory, project_id, version, agent, model,
-         time_created, time_updated, tokens_input, tokens_output, cost)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         time_created, time_updated, tokens_input, tokens_output, cost, time_archived)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             session.id,
@@ -366,6 +387,7 @@ def _insert_session(conn: sqlite3.Connection, table: str, session: SessionRecord
             session.tokens_input,
             session.tokens_output,
             session.cost,
+            1_700_000_000_000 if session.archived else None,
         ),
     )
 

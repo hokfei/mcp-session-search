@@ -298,6 +298,38 @@ class VectorIndex:
         except Exception as e:
             return Result.err(RepositoryError(f"Failed to count chunks: {e}", e))
 
+    async def remove(self, session_id: str) -> Result[None, RepositoryError]:
+        """Delete one session and all of its chunk vectors."""
+        try:
+            with self._conn() as conn:
+                conn.execute("DELETE FROM session_chunks WHERE session_id = ?", (session_id,))
+                conn.execute("DELETE FROM indexed_sessions WHERE session_id = ?", (session_id,))
+            return Result.ok(None)
+        except Exception as e:
+            return Result.err(RepositoryError(f"Failed to remove session: {e}", e))
+
+    async def prune_missing(self, live_ids: set[str]) -> Result[int, RepositoryError]:
+        """Drop index entries whose sessions no longer exist.
+
+        Without this, a session deleted from OpenCode keeps its embeddings and
+        full transcript text in our database indefinitely, and nothing in the
+        system could remove them. Returns how many sessions were dropped.
+        """
+        try:
+            with self._conn() as conn:
+                indexed = {
+                    row[0] for row in conn.execute("SELECT session_id FROM indexed_sessions")
+                }
+                orphans = indexed - live_ids
+
+                for session_id in orphans:
+                    conn.execute("DELETE FROM session_chunks WHERE session_id = ?", (session_id,))
+                    conn.execute("DELETE FROM indexed_sessions WHERE session_id = ?", (session_id,))
+
+            return Result.ok(len(orphans))
+        except Exception as e:
+            return Result.err(RepositoryError(f"Failed to prune stale sessions: {e}", e))
+
     async def clear(self) -> Result[None, RepositoryError]:
         """Delete all indexed data."""
         try:

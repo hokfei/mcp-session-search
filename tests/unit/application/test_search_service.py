@@ -409,6 +409,109 @@ class TestLongSessions:
         assert "routine filler text number 0" not in captured[0]
 
 
+class TestDeletion:
+    """A session removed from OpenCode must leave this index too."""
+
+    async def test_archived_sessions_are_not_indexed(self):
+        service = build_service(
+            [
+                make_session("live", "Live"),
+                make_session("gone", "Archived", archived=True),
+            ],
+            {
+                "live": (make_message("m1", "live", 0, "user", "python test"),),
+                "gone": (make_message("m2", "gone", 0, "user", "python test"),),
+            },
+        )
+
+        stats = await service.index_all()
+
+        assert stats.value.indexed == 1
+        assert set(service.store.records) == {"live"}
+
+    async def test_indexing_prunes_a_session_deleted_from_opencode(self):
+        """The session vanished from the source but is still in our index."""
+        service = build_service([make_session("survivor", "Survivor")])
+        await service.index_all()
+
+        # Simulate the user deleting a previously-indexed session.
+        await service.store.upsert_chunks(
+            session_id="ghost",
+            chunks=(),
+            title="Deleted upstream",
+            directory=None,
+            time_created=1,
+            time_updated=1,
+            message_count=1,
+            preview=None,
+        )
+        assert "ghost" in service.store.records
+
+        stats = await service.index_all()
+
+        assert stats.value.pruned == 1
+        assert "ghost" not in service.store.records
+
+    async def test_pruning_reports_nothing_when_the_index_is_clean(self):
+        service = build_service([make_session("a", "A")])
+        await service.index_all()
+
+        stats = await service.index_all(force=True)
+
+        assert stats.value.pruned == 0
+
+    async def test_pruned_sessions_leave_no_chunks(self):
+        service = build_service([make_session("a", "A")])
+        await service.index_all()
+        service.source.sessions = []
+
+        await service.index_all(force=True)
+
+        assert (await service.store.count()).value == 0
+
+    async def test_summary_mentions_pruned_sessions(self):
+        service = build_service([make_session("a", "A")])
+        await service.index_all()
+        await service.store.upsert_chunks("ghost", (), "G", None, 1, 1, 1, None)
+
+        stats = await service.index_all()
+
+        assert "Removed 1" in stats.value.summary
+
+    async def test_a_session_with_no_renderable_text_is_not_counted_as_indexed(self):
+        """It is neither indexed nor silently counted as a success."""
+        service = build_service([make_session("empty", "Empty", message_count=1)], {})
+
+        stats = await service.index_all()
+
+        assert stats.value.indexed == 0
+        assert stats.value.skipped == 1
+        assert service.store.records == {}
+
+    async def test_forget_session_removes_one_immediately(self):
+        service = build_service(
+            [make_session("a", "A"), make_session("b", "B")],
+            {
+                "a": (make_message("m1", "a", 0, "user", "python test"),),
+                "b": (make_message("m2", "b", 0, "user", "python test"),),
+            },
+        )
+        await service.index_all()
+        assert set(service.store.records) == {"a", "b"}
+
+        assert (await service.forget_session("a")).is_ok
+        assert set(service.store.records) == {"b"}
+
+    async def test_a_pruned_session_is_not_returned_by_search(self):
+        service = build_service([make_session("a", "A")])
+        await service.index_all()
+        await service.store.upsert_chunks("ghost", (), "Ghost", None, 1, 1, 1, None)
+
+        await service.reconcile()
+
+        assert "ghost" not in service.store.records
+
+
 @pytest.mark.parametrize("top_k", [1, 3, 5])
 async def test_top_k_variants(top_k: int):
     service = service_with_sessions(count=5)

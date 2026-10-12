@@ -134,6 +134,18 @@ class Settings(BaseSettings):
 
     # ==================== Indexing ====================
 
+    include_archived_sessions: bool = Field(
+        default=False,
+        description=(
+            "Whether sessions archived in OpenCode stay searchable. "
+            "OpenCode soft-archives rather than deleting, so an archived "
+            "session still exists in its database. When false (the default) "
+            "archived sessions are dropped from the index, which means "
+            "removing a session from the list really stops it being recallable. "
+            "Un-archiving then requires a reindex."
+        ),
+    )
+
     auto_index_on_search: bool = Field(
         default=True,
         description="Index new/changed sessions automatically when searching",
