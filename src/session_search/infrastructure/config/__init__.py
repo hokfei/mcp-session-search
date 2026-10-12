@@ -123,11 +123,12 @@ class Settings(BaseSettings):
     )
 
     similarity_threshold: float = Field(
-        default=0.55,
+        default=0.60,
         description=(
             "Minimum cosine similarity for results. Calibrated against the "
-            "local session corpus: real matches score 0.60-0.85 at rank 1, "
-            "unrelated queries top out around 0.535."
+            "local corpus with per-chunk scoring: correct passages score "
+            "0.64-0.89, unrelated questions top out at 0.564. The safe band is "
+            "(0.564, 0.641); 0.60 sits inside it. Remeasure with calibrate.py."
         ),
     )
 

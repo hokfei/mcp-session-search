@@ -98,10 +98,41 @@ migration and the fact that migrated vectors still match.
   longer than the ~4s it used to.
 - **Search scans more vectors.** Still milliseconds at this scale, but the cost
   grows with total chunks rather than session count.
-- **Threshold meaning shifted.** Scores are now computed per chunk. The 0.55
-  default was calibrated against per-session vectors and has **not** been
-  re-calibrated; it should be revisited with `calibrate.py` now that scoring
-  granularity has changed.
+- **Threshold had to be recalibrated.** Scores are now computed per chunk, so
+  the value tuned for per-session vectors was meaningless. Remeasured to 0.60;
+  the reasoning is in the next section.
+
+## Threshold Recalibration
+
+Scoring is now per chunk rather than per session, so the threshold calibrated
+under the old scheme no longer meant what it said and had to be remeasured.
+`calibrate.py` was rewritten for the occasion to measure something more useful
+than score separation: **whether the expected passage is retrieved, and at what
+rank.**
+
+The first version of that script checked probe expectations against session
+*titles*, which produced a false failure. Asking about Docker installation
+problems was reported as "not found" even though the tool had ranked first the
+passage *"try to install docker please, the ones I downloaded do not seem to
+work"* - in a session whose title did not contain the word Docker. Retrieval
+surfaces passages, so the probe now checks the matched chunk text.
+
+Measured on the local corpus with per-chunk scoring:
+
+| | |
+| --- | --- |
+| Expected passage ranked first | 8 / 10 |
+| Expected passage retrieved at all | 9 / 10 |
+| Lowest correct top-1 | 0.641 |
+| Highest false positive | 0.564 |
+
+**Default threshold raised from 0.55 to 0.60.** The safe band is
+(0.564, 0.641); the old 0.55 sat *below* it and admitted false positives, such
+as recommending "how to change a bicycle brake cable" at 0.564.
+
+The one genuine miss was a query about the vector-index decision that discussed
+the tool that is running it - the hardest case for retrieval, and a fair one to
+miss.
 
 ## References
 - [bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5)

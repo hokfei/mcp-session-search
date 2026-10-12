@@ -45,17 +45,19 @@ swapping in HNSW or sqlite-vec later changes one class and no caller.
 
 ## Threshold Calibration
 bge-small scores sit high in absolute terms, so the default similarity threshold
-was measured rather than guessed, using `calibrate.py` against the real corpus:
+was measured rather than guessed.
+
+The figures below are the **first** calibration, taken when scoring was one
+vector per session. They have since been **remeasured** under per-chunk scoring
+by [ADR 006](006-chunked-indexing.md); see that document for the current
+numbers and the current default of 0.60. The original run:
 
 | Query kind                       | Top-1 score |
 | -------------------------------- | ----------- |
 | Has a real answer in the history | 0.60 - 0.85 |
 | No plausible answer anywhere    | <= 0.535    |
 
-**Default threshold: 0.55.** At that value every relevant query returned its
-correct session while every irrelevant query returned nothing. The tails overlap
-below rank 1 - unrelated queries still produce matches around 0.48-0.53 - which
-is why the threshold filters them out rather than ranking them low.
+**Original default threshold: 0.55**, later superseded by 0.60.
 
 ## Consequences
 

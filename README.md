@@ -92,7 +92,7 @@ file. See `.env.example` for the full list. The ones that matter:
 | `MODEL_PATH` | `~/models/bge-small-en-v1.5-q8_0.gguf` | Must be an **embedding** model. |
 | `OPENCODE_DB_PATH` | `~/.local/share/opencode/opencode.db` | Read-only. |
 | `DATABASE_PATH` | `~/.opencode/session_search.db` | Our index only. |
-| `SIMILARITY_THRESHOLD` | `0.55` | Calibrated; see ADR 005. |
+| `SIMILARITY_THRESHOLD` | `0.60` | Calibrated; see ADR 005 and `calibrate.py`. |
 | `MODEL_N_GPU_LAYERS` | `0` | `0` is fine; the model is 36 MB. |
 | `CHAT_MODEL_PATH` | unset | Optional. Enables written answers. |
 

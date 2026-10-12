@@ -37,7 +37,7 @@ class SearchSessionsParams(BaseModel):
         ),
     )
     threshold: float = Field(
-        default=0.55,
+        default=0.60,
         ge=-1.0,
         le=1.0,
         description=(

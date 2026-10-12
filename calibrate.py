@@ -1,8 +1,13 @@
-"""Calibrate the similarity threshold against real session data.
+"""Calibrate the similarity threshold against the real session corpus.
 
-Scores from bge-small cluster tightly (unrelated text sits around 0.45-0.50,
-real matches around 0.75-0.85), so the default threshold decides whether search
-returns signal or noise. This measures where the gap actually is.
+Scoring granularity changed from one vector per session to one per chunk, so a
+threshold calibrated for the old scheme is no longer meaningful. This
+remeasures it.
+
+The metric is not "do scores look separated" but "does the right session rank
+first". Each probe names the session expected to answer it, so ranking is
+measured directly. Irrelevant probes catch the false positives a threshold low
+enough to recall everything would let through.
 """
 
 import asyncio
@@ -13,80 +18,155 @@ from session_search.infrastructure.llm import LocalAnswerWriter, LocalEmbedder
 from session_search.infrastructure.persistence.opencode import OpenCodeReader
 from session_search.infrastructure.persistence.vector_index import VectorIndex
 
-# Queries with a known answer in the session history.
-RELEVANT = [
-    "what MCP servers did we install",
-    "which python version is installed",
-    "how much do the free opencode models cost",
-    "what were the docker installation problems",
-    "how do I configure kotlin for iOS from windows",
+# Probes with a known answer. `expect` is a word that must appear in the text
+# of the chunk that matched - not in the session title. Retrieval surfaces
+# passages, so that is what has to be checked; an earlier version matched only
+# titles and wrongly reported a failure when the tool had in fact found the
+# right passage in a differently-titled session.
+PROBES = [
+    ("which python version did we install", "Python312"),
+    ("what MCP servers did we configure", "brave-search"),
+    ("how much do the free opencode models cost", "free"),
+    ("docker installation problems on windows", "docker"),
+    ("kotlin ios development from windows", "Kotlin"),
+    ("moving the skills to the global config folder", "skills"),
+    ("what did we decide about the vector index", "sqlite-vec"),
+    ("fixing the failing unit tests", "test"),
+    ("ollama model not showing in opencode", "ollama"),
+    ("the relationship between opencode UI and CLI", "CLI"),
 ]
 
-# Queries with no plausible answer anywhere in the history.
-IRRELEVANT = [
+# Probes with no plausible answer anywhere in the history. These should not
+# clear the threshold at all.
+NEGATIVE = [
     "what is the capital of France",
     "how do I bake sourdough bread",
-    "recommend a good book about marine biology",
+    "recommend a book about marine biology",
     "how to change a bicycle brake cable",
-    "what is the population of Reykjavik",
+    "population of Reykjavik",
+    "best recipe for carbonara",
+    "how do I tie a bowline knot",
 ]
+
+
+def service() -> SessionSearchService:
+    """Wire the real adapters."""
+    return SessionSearchService(
+        source=OpenCodeReader(settings.opencode_db_path),
+        store=VectorIndex(settings.database_path, settings.embedding_dim),
+        embedder=LocalEmbedder(),
+        writer=LocalAnswerWriter(),
+    )
+
+
+async def probe(svc: SessionSearchService, query: str, top_k: int = 10):
+    """Return ranked results for a query with no threshold filtering."""
+    result = await svc.search(query, top_k=top_k, threshold=-1.0, auto_index=False)
+    if not result.is_ok:
+        raise RuntimeError(result.error)
+    return result.value.matches
 
 
 async def main() -> None:
-    source = OpenCodeReader(settings.opencode_db_path)
-    store = VectorIndex(settings.database_path, settings.embedding_dim)
-    embedder = LocalEmbedder()
-    service = SessionSearchService(
-        source=source, store=store, embedder=embedder, writer=LocalAnswerWriter()
-    )
+    svc = service()
 
-    stats = await service.index_all()
-    print(f"index: {stats.value.summary if stats.is_ok else stats.error}\n")
+    stats = await svc.index_all()
+    if not stats.is_ok:
+        raise SystemExit(f"indexing failed: {stats.error}")
+    print(f"index: {stats.value.summary}\n")
 
-    relevant_scores: list[float] = []
-    irrelevant_scores: list[float] = []
+    # ---------------- positives ----------------
+    top1: list[float] = []
+    found_at_1 = 0
+    found_anywhere = 0
+    print("--- probes with a known answer ---")
+    for query, expect in PROBES:
+        matches = await probe(svc, query)
+        if not matches:
+            print(f"  !! no results at all for {query!r}")
+            continue
 
-    for label, queries, bucket in (
-        ("RELEVANT", RELEVANT, relevant_scores),
-        ("IRRELEVANT", IRRELEVANT, irrelevant_scores),
-    ):
-        print(f"--- {label} ---")
-        for query in queries:
-            result = await service.search(query, top_k=10, threshold=-1.0, auto_index=False)
-            if not result.is_ok:
-                print(f"  {query!r}: FAILED {result.error}")
-                continue
-            scores = [m.score for m in result.value.matches]
-            bucket.extend(scores)
-            preview = ", ".join(f"{s:.3f}" for s in scores[:6])
-            print(f"  {query}")
-            print(f"    top scores: {preview}")
-        print()
+        # The question is whether the expected content was retrieved, so look
+        # at the passage that matched rather than the session's name.
+        rank = next(
+            (
+                i + 1
+                for i, m in enumerate(matches)
+                if expect.lower() in (m.matched_text or "").lower()
+            ),
+            None,
+        )
 
-    if not relevant_scores or not irrelevant_scores:
-        print("Not enough data to calibrate.")
-        return
+        score = matches[0].score
+        top1.append(score)
+        if rank == 1:
+            found_at_1 += 1
+        if rank is not None:
+            found_anywhere += 1
 
-    relevant_scores.sort(reverse=True)
-    irrelevant_scores.sort(reverse=True)
+        marker = f"hit at rank {rank}" if rank else "NOT RETRIEVED"
+        print(f"  {score:.3f}  {marker:<16} {query}")
+        if not rank:
+            print(f"            expected {expect!r} in a matched passage")
 
-    worst_relevant = relevant_scores[-1]
-    best_irrelevant = irrelevant_scores[0]
+    # ---------------- negatives ----------------
+    negative_best: list[float] = []
+    print("\n--- probes with no answer in the corpus ---")
+    for query in NEGATIVE:
+        matches = await probe(svc, query, top_k=3)
+        best = matches[0].score if matches else 0.0
+        negative_best.append(best)
+        print(f"  {best:.3f}  {query}")
 
-    print("=== calibration ===")
-    print(f"relevant   n={len(relevant_scores)}  min={worst_relevant:.3f}  "
-          f"median={relevant_scores[len(relevant_scores)//2]:.3f}  max={relevant_scores[0]:.3f}")
-    print(f"irrelevant n={len(irrelevant_scores)}  max={best_irrelevant:.3f}  "
-          f"median={irrelevant_scores[len(irrelevant_scores)//2]:.3f}")
-    print()
-    if best_irrelevant < worst_relevant:
-        midpoint = (worst_relevant + best_irrelevant) / 2
-        print(f"Clean separation. Worst relevant ({worst_relevant:.3f}) > "
-              f"best irrelevant ({best_irrelevant:.3f}).")
+    # ---------------- verdict ----------------
+    print("\n=== calibration ===")
+    correct_total = len(PROBES)
+    print(f"expected passage ranked first: {found_at_1}/{correct_total}")
+    print(f"expected passage retrieved at all: {found_anywhere}/{correct_total}")
+
+    if not top1 or not negative_best:
+        raise SystemExit("not enough data")
+
+    top1.sort(reverse=True)
+    negative_best.sort(reverse=True)
+
+    weakest_positive = min(top1)
+    strongest_negative = max(negative_best)
+
+    print(f"\nlowest correct top-1 : {weakest_positive:.3f}")
+    print(f"highest false positive: {strongest_negative:.3f}")
+
+    if weakest_positive > strongest_negative:
+        midpoint = (weakest_positive + strongest_negative) / 2
+        print(
+            f"\nClean separation. A threshold anywhere in "
+            f"({strongest_negative:.3f}, {weakest_positive:.3f}) keeps every "
+            f"correct hit and rejects every false positive."
+        )
         print(f"Suggested threshold: {midpoint:.2f}")
     else:
-        print("No clean separation at top_k=10; scores overlap.")
-        print(f"A threshold above {best_irrelevant:.3f} would start dropping real matches.")
+        print(
+            "\nOverlap: no threshold both keeps every correct hit and rejects "
+            "every false positive."
+        )
+        print(
+            f"  <= {weakest_positive:.3f} keeps all correct hits but admits "
+            f"{sum(1 for s in negative_best if s > strongest_negative)} false "
+            f"positive(s) at most."
+        )
+
+    current = settings.similarity_threshold
+    print(f"\ncurrent configured threshold: {current:.2f}")
+
+    if weakest_positive > strongest_negative:
+        if current > weakest_positive:
+            print("verdict: current threshold is TOO HIGH - it drops correct hits.")
+        elif current <= strongest_negative:
+            print("verdict: current threshold is TOO LOW - it admits false positives.")
+        else:
+            print(f"verdict: current threshold sits inside the safe band.")
+    else:
+        print("verdict: no clean band; see the overlap note above.")
 
 
 if __name__ == "__main__":
