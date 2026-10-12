@@ -156,6 +156,11 @@ class OpenCodeReader:
         """Get a session's conversational messages in chronological order."""
         try:
             with self._conn() as conn:
+                # Both generations coexist during migration, so the table alone
+                # does not identify which one holds a given session's messages:
+                # a session present only in legacy `session` has no rows in
+                # `session_message` at all. Pick per session, falling back when
+                # the v2 table yields nothing.
                 query: str
                 if self._has_table(conn, "session_message"):
                     query = """
@@ -165,25 +170,37 @@ class OpenCodeReader:
                           AND type IN ('user', 'assistant', 'system')
                         ORDER BY seq ASC
                     """
+                    rows = conn.execute(query, [session_id]).fetchall()
                 else:
+                    rows = []
+                legacy = False
+
+                if not rows and self._has_table(conn, "message"):
                     # Legacy rows carry the role inside the JSON payload and
                     # have no monotonic seq, so rowid stands in for ordering.
                     query = """
                         SELECT id, session_id, rowid AS seq, NULL AS type,
-                               data, time_created
+                               id AS message_id, data, time_created
                         FROM message
                         WHERE session_id = ?
                         ORDER BY time_created ASC
                     """
+                    params: list[Any] = [session_id]
+                    if limit:
+                        query += " LIMIT ?"
+                        params.append(limit)
+                    rows = conn.execute(query, params).fetchall()
+                    legacy = True
+                else:
+                    if limit and rows:
+                        rows = rows[:limit]
+                    legacy = False
 
-                params: list[Any] = [session_id]
-                if limit:
-                    query += " LIMIT ?"
-                    params.append(limit)
-
-                rows = conn.execute(query, params).fetchall()
-
-                messages = [m for m in (self._to_message(r) for r in rows) if m]
+                messages = [
+                    m
+                    for m in (self._to_message(r, conn if legacy else None) for r in rows)
+                    if m
+                ]
                 return Result.ok(tuple(messages))
 
         except Exception as e:
@@ -327,6 +344,34 @@ class OpenCodeReader:
     # ==================== Mapping ====================
 
     @staticmethod
+    def _legacy_text(conn: sqlite3.Connection, message_id: str) -> str:
+        """Concatenate a legacy message's prose from its `text` parts.
+
+        Reasoning, tool calls and step markers are deliberately excluded: they
+        are not what the user or assistant actually said, and embedding them
+        crowds out the conversational signal.
+        """
+        if not OpenCodeReader._has_table(conn, "part"):
+            return ""
+
+        chunks: list[str] = []
+        for (payload,) in conn.execute(
+            "SELECT data FROM part WHERE message_id = ? ORDER BY rowid ASC",
+            (message_id,),
+        ):
+            try:
+                part = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if part.get("type") != "text":
+                continue
+            text = str(part.get("text", "")).strip()
+            if text:
+                chunks.append(text)
+
+        return "\n".join(chunks)
+
+    @staticmethod
     def _has_table(conn: sqlite3.Connection, name: str) -> bool:
         row = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
@@ -352,8 +397,14 @@ class OpenCodeReader:
             archived=bool(row["archived"]) if "archived" in row.keys() else False,
         )
 
-    def _to_message(self, row: sqlite3.Row) -> MessageRecord | None:
-        """Map one message row, returning None for unusable entries."""
+    def _to_message(
+        self, row: sqlite3.Row, conn: sqlite3.Connection | None = None
+    ) -> MessageRecord | None:
+        """Map one message row, returning None for unusable entries.
+
+        `conn` is passed only for legacy rows, whose body text lives in the
+        separate `part` table rather than in the message payload.
+        """
         try:
             data = json.loads(row["data"])
         except (json.JSONDecodeError, TypeError):
@@ -376,6 +427,11 @@ class OpenCodeReader:
             text = str(data.get("text", ""))
         else:
             return None
+
+        # Legacy message payloads hold only metadata; the reply itself is a
+        # `text` part attached to the message.
+        if not text.strip() and conn is not None:
+            text = self._legacy_text(conn, row["message_id"])
 
         if not text.strip():
             return None

@@ -363,6 +363,13 @@ CREATE TABLE message (
     data TEXT,
     time_created INTEGER
 );
+CREATE TABLE part (
+    id TEXT PRIMARY KEY,
+    message_id TEXT,
+    session_id TEXT,
+    data TEXT,
+    time_created INTEGER
+);
 """
 
 
@@ -462,6 +469,54 @@ def legacy_database(tmp_path: Path) -> Path:
             "INSERT INTO message (id, session_id, data, time_created) VALUES (?, ?, ?, ?)",
             (message_id, session.id, json.dumps(payload), 1_700_000_000_000 + offset),
         )
+
+    conn.commit()
+    conn.close()
+    return db
+
+
+@pytest.fixture
+def legacy_part_database(tmp_path: Path) -> Path:
+    """A legacy database whose prose lives in `part`, as OpenCode really writes it.
+
+    Legacy `message.data` holds only metadata (role, model, tokens); the text a
+    turn actually contained is stored as `text` parts attached to the message.
+    """
+    db = tmp_path / "legacy_parts.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(_LEGACY_SCHEMA)
+
+    session = make_session("ses_parts", "Part-backed session", message_count=2)
+    _insert_session(conn, "session", session)
+
+    rows = [
+        ("lm1", "user", [("p1", "text", "what does the parser do"), ("p2", "step-start", None)]),
+        (
+            "lm2",
+            "assistant",
+            [
+                ("p3", "reasoning", "thinking about the parser"),
+                ("p4", "text", "it reads the legacy message table"),
+                ("p5", "tool", None),
+            ],
+        ),
+    ]
+    for message_id, role, parts in rows:
+        conn.execute(
+            "INSERT INTO message (id, session_id, data, time_created) VALUES (?, ?, ?, ?)",
+            (message_id, session.id, json.dumps({"role": role}), 1_700_000_000_000),
+        )
+        for part_id, part_type, text in parts:
+            payload = {"type": part_type}
+            if text is not None:
+                payload["text"] = text
+            conn.execute(
+                """
+                INSERT INTO part (id, message_id, session_id, data, time_created)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (part_id, message_id, session.id, json.dumps(payload), 1_700_000_000_000),
+            )
 
     conn.commit()
     conn.close()
