@@ -103,6 +103,13 @@ class Settings(BaseSettings):
         ),
     )
 
+    answer_context_sessions: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="How many matched sessions to include as excerpts when writing an answer.",
+    )
+
     # ==================== Search ====================
 
     default_top_k: int = Field(

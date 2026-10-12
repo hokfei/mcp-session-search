@@ -21,6 +21,43 @@ from session_search.infrastructure.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Rough characters per token for English prose. Deliberately pessimistic: a
+# chunk full of code or identifiers tokenises worse than ordinary text, and
+# overshooting the context window makes synthesis fail outright.
+_CHARS_PER_TOKEN = 3.0
+
+# Room for the chat template, the system prompt, and role markers, which are
+# added by the model rather than by us.
+_TEMPLATE_RESERVE_TOKENS = 500
+
+
+def _context_char_budget(sessions: int) -> int:
+    """Characters of excerpt that fit alongside the answer inside n_ctx.
+
+    Chunking raised each excerpt from ~900 to ~1200 characters, which is enough
+    for three of them to overflow the chat model's context window. Without a
+    budget, synthesis fails with "requested tokens exceed context window" and
+    silently degrades to a listing.
+    """
+    available = settings.chat_model_n_ctx - settings.max_summary_tokens - _TEMPLATE_RESERVE_TOKENS
+    if available <= 0:
+        # Degenerate config; give it a token's worth rather than nothing.
+        return int(_CHARS_PER_TOKEN)
+    return int(available * _CHARS_PER_TOKEN)
+
+
+def _clip(text: str, limit: int) -> str:
+    """Trim text to a limit, cutting on a line boundary where possible."""
+    if not text or len(text) <= limit:
+        return text
+
+    clipped = text[:limit]
+    boundary = clipped.rfind("\n")
+    if boundary > limit // 2:
+        return clipped[:boundary]
+
+    return clipped.rsplit(" ", 1)[0] if " " in clipped else clipped
+
 
 class SessionSearchService:
     """Indexes OpenCode session history and answers questions about it."""
@@ -218,11 +255,19 @@ class SessionSearchService:
         on a long session hands the model a few hundred characters that have
         nothing to do with the question.
         """
-        parts: list[str] = []
+        chosen = matches[: settings.answer_context_sessions]
+        if not chosen:
+            return ""
 
-        for match in matches[:3]:
+        budget = _context_char_budget(len(chosen))
+        per_session = max(300, budget // len(chosen))
+
+        parts: list[str] = []
+        for match in chosen:
             excerpt = match.best_excerpt or await self._opening_of(match.session_id)
-            parts.append(f"--- {match.display_title} ---\n{excerpt or '(empty)'}")
+            parts.append(
+                f"--- {match.display_title} ---\n{_clip(excerpt, per_session) or '(empty)'}"
+            )
 
         return "\n\n".join(parts)
 
