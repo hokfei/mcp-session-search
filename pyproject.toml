@@ -1,0 +1,74 @@
+[project]
+name = "mcp-session-search"
+version = "0.1.0"
+description = "Cross-session semantic memory for AI assistants using local LLM embeddings"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Your Name", email = "you@example.com"}]
+keywords = ["mcp", "memory", "semantic-search", "llm", "embeddings"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "mcp>=1.0.0",
+    "llama-cpp-python>=0.2.90",
+    "numpy>=1.26.0",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-mock>=3.14.0",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+    "types-python-dateutil>=2.9.0",
+]
+gpu = [
+    "llama-cpp-python[cu121]>=0.2.90",
+]
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "integration: spawns real subprocesses or touches the filesystem",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "W", "C90", "PTH", "T20"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# A CLI is supposed to print to the terminal.
+"src/session_search/__main__.py" = ["T201"]
+# Test helpers build fixtures and drive subprocesses.
+"tests/*" = ["T201", "PTH"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+ignore_missing_imports = true

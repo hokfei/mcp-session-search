@@ -1,0 +1,17 @@
+# Normalize line endings so diffs are clean across platforms.
+* text=auto eol=lf
+
+# Shell scripts must keep LF or they break on Unix.
+*.sh text eol=lf
+
+# Windows scripts must keep CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files.
+*.gguf binary
+*.db binary
+*.png binary
+*.jpg binary
+*.ico binary
+*.whl binary
