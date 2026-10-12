@@ -1,12 +1,20 @@
 """Vector index for OpenCode sessions.
 
-Keeps embeddings and search metadata in our own SQLite database. Cosine
-similarity is computed in pure Python, which avoids the sqlite-vec native
-extension (unavailable on this platform) and keeps the dependency surface small.
+Stores embeddings and metadata in our own SQLite database. Cosine similarity is
+computed in pure Python, which avoids the sqlite-vec native extension
+(unavailable on this platform) and keeps the dependency surface small.
 
-At ~10k sessions x 384 dims a linear scan is a few milliseconds. If the index
-ever grows an order of magnitude larger, swap the scoring loop for HNSW without
-changing the `VectorStore` port.
+A session is stored as several **chunks**, each with its own embedding, because
+bge-small only accepts short passages. Storing one vector per session forced a
+truncation, which made everything past the first ~1500 characters invisible to
+search - unacceptable for long-running sessions, where the recent work is the
+part worth recalling.
+
+Search scores every chunk, then collapses to one result per session using each
+session's best-scoring chunk. A session therefore matches on any part of itself.
+
+At ~10k sessions x 384 dims the linear scan is still a few milliseconds. Beyond
+that, swap the scoring loop for HNSW without changing the `VectorStore` port.
 """
 
 import math
@@ -18,7 +26,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from session_search.domain.errors import RepositoryError, Result
-from session_search.domain.model import SessionMatch
+from session_search.domain.model import ChunkVector, SessionMatch
 
 
 def cosine_similarity(a: bytes, b: bytes) -> float:
@@ -45,7 +53,7 @@ def cosine_similarity(a: bytes, b: bytes) -> float:
 
 
 class VectorIndex:
-    """Stores session embeddings with pure-Python cosine search."""
+    """Stores per-chunk session embeddings with pure-Python cosine search."""
 
     def __init__(self, db_path: Path, embedding_dim: int = 384) -> None:
         self.db_path = Path(db_path)
@@ -78,8 +86,16 @@ class VectorIndex:
                     time_updated INTEGER NOT NULL,
                     message_count INTEGER DEFAULT 0,
                     preview TEXT,
-                    embedding BLOB,
+                    chunk_count INTEGER DEFAULT 1,
                     indexed_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS session_chunks (
+                    session_id TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    embedding BLOB,
+                    text TEXT,
+                    PRIMARY KEY (session_id, chunk_index)
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_indexed_time
@@ -89,11 +105,52 @@ class VectorIndex:
                     ON indexed_sessions(directory);
                 """
             )
+            self._migrate(conn)
 
-    async def upsert(
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Bring an index written by an earlier version up to date."""
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(indexed_sessions)")}
+
+        if "embedding" in columns:
+            # Pre-chunking layout: move the single stored vector into the
+            # chunk table so previously indexed sessions stay searchable.
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO session_chunks (session_id, chunk_index, embedding)
+                SELECT session_id, 0, embedding
+                FROM indexed_sessions
+                WHERE embedding IS NOT NULL
+                """
+            )
+            conn.execute("ALTER TABLE indexed_sessions DROP COLUMN embedding")
+
+        if "chunk_count" not in columns:
+            conn.execute("ALTER TABLE indexed_sessions ADD COLUMN chunk_count INTEGER DEFAULT 1")
+
+        # A chunk table written before excerpt storage gained the text column.
+        chunk_columns = {row["name"] for row in conn.execute("PRAGMA table_info(session_chunks)")}
+        if chunk_columns and "text" not in chunk_columns:
+            conn.execute("ALTER TABLE session_chunks ADD COLUMN text TEXT")
+
+        conn.execute(
+            """
+            UPDATE indexed_sessions
+            SET chunk_count = (
+                SELECT COUNT(*) FROM session_chunks c
+                WHERE c.session_id = indexed_sessions.session_id
+            )
+            WHERE EXISTS (
+                SELECT 1 FROM session_chunks c
+                WHERE c.session_id = indexed_sessions.session_id
+            )
+            """
+        )
+
+    async def upsert_chunks(
         self,
         session_id: str,
-        embedding: bytes,
+        chunks: tuple[ChunkVector, ...],
         title: str | None,
         directory: str | None,
         time_created: int,
@@ -101,14 +158,22 @@ class VectorIndex:
         message_count: int,
         preview: str | None,
     ) -> Result[None, RepositoryError]:
-        """Insert or replace a session's vector and metadata."""
+        """Insert or replace a session's chunks and metadata."""
         try:
             with self._conn() as conn:
+                conn.execute("DELETE FROM session_chunks WHERE session_id = ?", (session_id,))
+                conn.executemany(
+                    """
+                    INSERT INTO session_chunks (session_id, chunk_index, embedding, text)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    [(session_id, c.index, c.embedding, c.text) for c in chunks],
+                )
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO indexed_sessions
                     (session_id, title, directory, time_created, time_updated,
-                     message_count, preview, embedding, indexed_at)
+                     message_count, preview, chunk_count, indexed_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
@@ -119,7 +184,7 @@ class VectorIndex:
                         time_updated,
                         message_count,
                         preview,
-                        embedding,
+                        len(chunks),
                         int(time.time() * 1000),
                     ),
                 )
@@ -135,36 +200,45 @@ class VectorIndex:
         threshold: float = 0.35,
         directory: str | None = None,
     ) -> Result[tuple[SessionMatch, ...], RepositoryError]:
-        """Rank indexed sessions by cosine similarity to the query vector."""
+        """Rank sessions by their best-matching chunk."""
         try:
             with self._conn() as conn:
                 if directory:
-                    cursor = conn.execute(
+                    rows = conn.execute(
                         """
-                        SELECT session_id, title, directory, time_created,
-                               message_count, preview, embedding
-                        FROM indexed_sessions
-                        WHERE directory = ? AND embedding IS NOT NULL
+                        SELECT s.session_id, s.title, s.directory, s.time_created,
+                               s.message_count, s.preview,
+                               c.chunk_index, c.embedding, c.text
+                        FROM session_chunks c
+                        JOIN indexed_sessions s ON s.session_id = c.session_id
+                        WHERE s.directory = ? AND c.embedding IS NOT NULL
                         """,
                         (directory,),
                     )
                 else:
-                    cursor = conn.execute(
+                    rows = conn.execute(
                         """
-                        SELECT session_id, title, directory, time_created,
-                               message_count, preview, embedding
-                        FROM indexed_sessions
-                        WHERE embedding IS NOT NULL
+                        SELECT s.session_id, s.title, s.directory, s.time_created,
+                               s.message_count, s.preview,
+                               c.chunk_index, c.embedding, c.text
+                        FROM session_chunks c
+                        JOIN indexed_sessions s ON s.session_id = c.session_id
+                        WHERE c.embedding IS NOT NULL
                         """
                     )
 
-                scored: list[tuple[float, sqlite3.Row]] = []
-                for row in cursor:
+                # Best score wins: a session matches on any of its chunks, and
+                # the winning chunk's text is the part worth showing.
+                best: dict[str, tuple[float, sqlite3.Row]] = {}
+                for row in rows:
                     score = cosine_similarity(query_embedding, row["embedding"])
-                    if score >= threshold:
-                        scored.append((score, row))
+                    if score < threshold:
+                        continue
+                    current = best.get(row["session_id"])
+                    if current is None or score > current[0]:
+                        best[row["session_id"]] = (score, row)
 
-            scored.sort(key=lambda pair: pair[0], reverse=True)
+            ranked = sorted(best.values(), key=lambda pair: pair[0], reverse=True)
 
             return Result.ok(
                 tuple(
@@ -176,8 +250,10 @@ class VectorIndex:
                         message_count=row["message_count"],
                         preview=row["preview"],
                         score=score,
+                        matched_chunk_index=row["chunk_index"],
+                        matched_text=row["text"],
                     )
-                    for score, row in scored[:top_k]
+                    for score, row in ranked[:top_k]
                 )
             )
 
@@ -214,14 +290,23 @@ class VectorIndex:
         except Exception as e:
             return Result.err(RepositoryError(f"Failed to count indexed sessions: {e}", e))
 
+    async def count_chunks(self) -> Result[int, RepositoryError]:
+        """Total number of stored chunk vectors."""
+        try:
+            with self._conn() as conn:
+                return Result.ok(conn.execute("SELECT COUNT(*) FROM session_chunks").fetchone()[0])
+        except Exception as e:
+            return Result.err(RepositoryError(f"Failed to count chunks: {e}", e))
+
     async def clear(self) -> Result[None, RepositoryError]:
         """Delete all indexed data."""
         try:
             with self._conn() as conn:
+                conn.execute("DELETE FROM session_chunks")
                 conn.execute("DELETE FROM indexed_sessions")
             return Result.ok(None)
         except Exception as e:
             return Result.err(RepositoryError(f"Failed to clear index: {e}", e))
 
 
-__all__ = ["VectorIndex", "cosine_similarity"]
+__all__ = ["ChunkVector", "VectorIndex", "cosine_similarity"]

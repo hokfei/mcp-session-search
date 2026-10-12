@@ -131,9 +131,21 @@ class Settings(BaseSettings):
         description="Index new/changed sessions automatically when searching",
     )
 
-    index_max_transcript_chars: int = Field(
-        default=1500,
-        description="Max transcript chars embedded per session",
+    index_chunk_chars: int = Field(
+        default=1200,
+        description=(
+            "Characters of transcript per embedded chunk. bge-small is trained "
+            "on 512-token passages and degrades on longer input, so a session "
+            "is split into chunks rather than embedded whole."
+        ),
+    )
+
+    index_chunk_overlap_chars: int = Field(
+        default=200,
+        description=(
+            "Characters of overlap between adjacent chunks, so a fact spanning "
+            "a boundary stays findable from either side."
+        ),
     )
 
     index_batch_size: int = Field(

@@ -7,8 +7,10 @@ whether the backing store is SQLite or an in-memory list.
 
 import logging
 
+from session_search.domain.chunking import chunk_transcript
 from session_search.domain.errors import RepositoryError, Result, SearchError
 from session_search.domain.model import (
+    ChunkVector,
     IndexStats,
     SearchOutcome,
     SessionMatch,
@@ -37,34 +39,51 @@ class SessionSearchService:
 
     # ==================== Indexing ====================
 
-    async def index_session(self, session: SessionRecord) -> Result[None, RepositoryError]:
-        """Embed one session's transcript and store its vector."""
-        transcript_result = await self.source.get_session_transcript(
-            session.id, max_chars=settings.index_max_transcript_chars
+    async def index_session(self, session: SessionRecord) -> Result[IndexStats, RepositoryError]:
+        """Embed a session's transcript, one chunk at a time.
+
+        The whole transcript is covered, not just its opening. Truncating meant
+        a long-running session was represented entirely by how it started, so
+        anything discussed later - which is usually the work worth recalling -
+        was unreachable.
+        """
+        messages_result = await self.source.get_session_messages(session.id)
+        if not messages_result.is_ok:
+            return Result.err(messages_result.error)
+
+        chunks = chunk_transcript(
+            messages_result.value,
+            max_chars=settings.index_chunk_chars,
+            overlap_chars=settings.index_chunk_overlap_chars,
+            title=session.title,
         )
-        if not transcript_result.is_ok:
-            return Result.err(transcript_result.error)
 
-        transcript = transcript_result.value
+        if not chunks:
+            # Nothing renderable to embed.
+            return Result.ok(IndexStats(indexed=0, skipped=0, found=0, chunks=0))
 
-        # A session with neither a title nor any text carries no signal.
-        if not transcript.strip() and not session.title:
-            return Result.ok(None)
+        vectors: list[ChunkVector] = []
+        for chunk in chunks:
+            embed_result = await self.embedder.embed(chunk.text)
+            if not embed_result.is_ok:
+                return Result.err(RepositoryError(f"Embed failed: {embed_result.error}"))
+            vectors.append(ChunkVector(chunk.index, embed_result.value.to_bytes(), chunk.text))
 
-        embed_result = await self.embedder.embed(self._index_text(session, transcript))
-        if not embed_result.is_ok:
-            return Result.err(RepositoryError(f"Embed failed: {embed_result.error}"))
-
-        return await self.store.upsert(
+        stored = await self.store.upsert_chunks(
             session_id=session.id,
-            embedding=embed_result.value.to_bytes(),
+            chunks=tuple(vectors),
             title=session.title,
             directory=session.directory,
             time_created=session.time_created,
             time_updated=session.time_updated,
             message_count=session.message_count,
-            preview=transcript[:200].strip() or None,
+            preview=chunks[0].text[:200].strip() or None,
         )
+
+        if not stored.is_ok:
+            return stored
+
+        return Result.ok(IndexStats(indexed=1, skipped=0, found=1, chunks=len(vectors)))
 
     async def index_all(self, force: bool = False) -> Result[IndexStats, RepositoryError]:
         """Index every session OpenCode knows about."""
@@ -91,7 +110,7 @@ class SessionSearchService:
 
         sessions = sessions_result.value
         if not sessions:
-            return Result.ok(IndexStats(indexed=0, skipped=0, found=0))
+            return Result.ok(IndexStats(indexed=0, skipped=0, found=0, chunks=0))
 
         already: set[str] = set()
         if not force:
@@ -100,6 +119,7 @@ class SessionSearchService:
 
         indexed = 0
         skipped = 0
+        chunks_written = 0
 
         for session in sessions:
             # Empty sessions carry no signal, and already-indexed ones are
@@ -111,12 +131,16 @@ class SessionSearchService:
             result = await self.index_session(session)
             if result.is_ok:
                 indexed += 1
+                chunks_written += result.value.chunks
             else:
                 skipped += 1
                 logger.warning("Indexing %s failed: %s", session.id, result.error)
 
-        logger.info("Index pass: %s", IndexStats(indexed, skipped, len(sessions)).summary)
-        return Result.ok(IndexStats(indexed=indexed, skipped=skipped, found=len(sessions)))
+        stats = IndexStats(
+            indexed=indexed, skipped=skipped, found=len(sessions), chunks=chunks_written
+        )
+        logger.info("Index pass: %s", stats.summary)
+        return Result.ok(stats)
 
     # ==================== Search ====================
 
@@ -187,29 +211,25 @@ class SessionSearchService:
             logger.warning("Incremental indexing failed: %s", result.error)
 
     async def _gather_context(self, matches: tuple[SessionMatch, ...]) -> str:
-        """Pull real transcript text for the strongest matches."""
+        """Pull the most relevant text for each matched session.
+
+        A session can match on any part of itself, so the passage that actually
+        matched is shown rather than the session's opening. Without this, a hit
+        on a long session hands the model a few hundred characters that have
+        nothing to do with the question.
+        """
         parts: list[str] = []
 
         for match in matches[:3]:
-            transcript_result = await self.source.get_session_transcript(
-                match.session_id, max_chars=900
-            )
-            transcript = transcript_result.value if transcript_result.is_ok else ""
-            parts.append(
-                f"--- {match.display_title} ---\n{transcript or match.preview or '(empty)'}"
-            )
+            excerpt = match.best_excerpt or await self._opening_of(match.session_id)
+            parts.append(f"--- {match.display_title} ---\n{excerpt or '(empty)'}")
 
         return "\n\n".join(parts)
 
-    @staticmethod
-    def _index_text(session: SessionRecord, transcript: str) -> str:
-        """Compose the text that represents a session for embedding."""
-        parts: list[str] = []
-        if session.title:
-            parts.append(session.title)
-        if transcript:
-            parts.append(transcript)
-        return "\n".join(parts)
+    async def _opening_of(self, session_id: str) -> str:
+        """A session's first messages, used when no chunk text is stored."""
+        result = await self.source.get_session_transcript(session_id, max_chars=900)
+        return result.value if result.is_ok else ""
 
 
 __all__ = ["SessionSearchService"]

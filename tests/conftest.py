@@ -159,10 +159,10 @@ class FakeStore:
     def __init__(self) -> None:
         self.records: dict[str, dict] = {}
 
-    async def upsert(
+    async def upsert_chunks(
         self,
         session_id: str,
-        embedding: bytes,
+        chunks: tuple,
         title: str | None,
         directory: str | None,
         time_created: int,
@@ -170,13 +170,14 @@ class FakeStore:
         message_count: int,
         preview: str | None,
     ) -> Result[None, object]:
+        """Store one entry per chunk, mirroring the real store's shape."""
         from session_search.domain.model import SessionMatch
 
-        # SessionMatch deliberately carries no time_updated; keep it alongside
-        # the record because incremental indexing needs it.
         self.records[session_id] = {
-            "embedding": embedding,
+            # SessionMatch carries no time_updated; keep it alongside the record
+            # because incremental indexing needs it.
             "time_updated": time_updated,
+            "chunks": list(chunks),
             "match": SessionMatch(
                 session_id=session_id,
                 title=title,
@@ -198,19 +199,35 @@ class FakeStore:
     ) -> Result[tuple, object]:
         from dataclasses import replace
 
-        from session_search.infrastructure.persistence.vector_index import cosine_similarity
+        from session_search.infrastructure.persistence.vector_index import (
+            cosine_similarity,
+        )
 
-        scored = []
+        # A session scores as its best-matching chunk, and the winning chunk's
+        # text comes back with it, exactly as the real store does.
+        best: dict[str, tuple[float, object, object]] = {}
+
         for record in self.records.values():
             match = record["match"]
             if directory is not None and match.directory != directory:
                 continue
-            score = cosine_similarity(query_embedding, record["embedding"])
-            if score >= threshold:
-                scored.append(replace(match, score=score))
+            for chunk in record["chunks"]:
+                score = cosine_similarity(query_embedding, chunk.embedding)
+                current = best.get(match.session_id)
+                if current is None or score > current[0]:
+                    best[match.session_id] = (score, match, chunk)
 
-        scored.sort(key=lambda m: m.score, reverse=True)
-        return Result.ok(tuple(scored[:top_k]))
+        scored = [pair for pair in best.values() if pair[0] >= threshold]
+        scored.sort(key=lambda triple: triple[0], reverse=True)
+
+        return Result.ok(
+            tuple(
+                replace(
+                    match, score=score, matched_chunk_index=chunk.index, matched_text=chunk.text
+                )
+                for score, match, chunk in scored[:top_k]
+            )
+        )
 
     async def get_indexed_ids(self) -> Result[set[str], object]:
         return Result.ok(set(self.records))

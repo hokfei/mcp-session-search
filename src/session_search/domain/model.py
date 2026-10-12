@@ -71,6 +71,8 @@ class SessionMatch:
     message_count: int
     preview: str | None
     score: float
+    matched_chunk_index: int | None = None
+    matched_text: str | None = None
 
     @property
     def created_at(self) -> datetime:
@@ -80,6 +82,26 @@ class SessionMatch:
     def display_title(self) -> str:
         return self.title or "untitled session"
 
+    @property
+    def best_excerpt(self) -> str | None:
+        """The passage that matched, falling back to the session's preview."""
+        return self.matched_text or self.preview
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkVector:
+    """One chunk of a session, with its serialized embedding and text.
+
+    The text is retained so that a search hit can show the passage that
+    actually matched. A session can match anywhere in its history, so returning
+    its opening - as a single-vector index had to - usually shows the wrong
+    part.
+    """
+
+    index: int
+    embedding: bytes
+    text: str = ""
+
 
 @dataclass(frozen=True, slots=True)
 class IndexStats:
@@ -88,10 +110,14 @@ class IndexStats:
     indexed: int
     skipped: int
     found: int
+    chunks: int = 0
 
     @property
     def summary(self) -> str:
-        return f"Indexed {self.indexed} of {self.found} sessions ({self.skipped} skipped)."
+        text = f"Indexed {self.indexed} of {self.found} sessions ({self.skipped} skipped)."
+        if self.chunks:
+            text += f" {self.chunks} chunks."
+        return text
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +167,7 @@ class HealthReport:
 
 
 __all__ = [
+    "ChunkVector",
     "HealthReport",
     "IndexStats",
     "MessageRecord",

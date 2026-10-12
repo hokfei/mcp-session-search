@@ -13,6 +13,7 @@ from session_search.domain.errors import (
     Result,
 )
 from session_search.domain.model import (
+    ChunkVector,
     HealthReport,
     IndexStats,
     MessageRecord,
@@ -77,10 +78,10 @@ class SessionSource(Protocol):
 class VectorStore(Protocol):
     """Stores session embeddings and performs similarity search."""
 
-    async def upsert(
+    async def upsert_chunks(
         self,
         session_id: str,
-        embedding: bytes,
+        chunks: tuple[ChunkVector, ...],
         title: str | None,
         directory: str | None,
         time_created: int,
@@ -88,7 +89,7 @@ class VectorStore(Protocol):
         message_count: int,
         preview: str | None,
     ) -> Result[None, RepositoryError]:
-        """Insert or replace a session's vector and metadata."""
+        """Insert or replace a session's chunk vectors and metadata."""
         ...
 
     async def search(
@@ -98,7 +99,7 @@ class VectorStore(Protocol):
         threshold: float = 0.35,
         directory: str | None = None,
     ) -> Result[tuple[SessionMatch, ...], RepositoryError]:
-        """Rank stored sessions by similarity to a query vector."""
+        """Rank stored sessions by similarity, one result per session."""
         ...
 
     async def get_indexed_ids(self) -> Result[set[str], RepositoryError]:

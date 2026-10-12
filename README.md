@@ -10,13 +10,25 @@ it. Nothing needs to be logged by hand.
 ## How it works
 
 ```
-opencode.db ──read──▶ transcript text ──embed──▶ vector ──▶ session_search.db
-   (source of truth)     (1500 chars)   (bge-small)      (our index only)
+opencode.db ──read──▶ messages ──chunk──▶ embed each ──▶ session_search.db
+  (source of truth)    (1200 chars)    (bge-small)        (281 chunks)
 
-   query ──embed──▶ cosine similarity ──▶ ranked sessions ──▶ answer
+   query ──embed──▶ score every chunk ──▶ best chunk per session ──▶ answer
 ```
 
 Everything runs locally. No API keys, no network calls.
+
+## How sessions are indexed
+
+A session is stored as **overlapping chunks**, not one vector. The embedding
+model only accepts short passages, and truncating a session to its opening made
+everything discussed later unreachable — the tool could not recall a decision
+made in the very conversation it was running in. See
+[ADR 006](docs/adr/006-chunked-indexing.md).
+
+Search scores every chunk and keeps each session's best one, so a session matches
+on any part of itself. The matching chunk's text comes back with the result,
+which is what the answer is written from.
 
 ## Tools
 
@@ -124,3 +136,4 @@ cleanly, which deadlocks instead of failing.
 - [ADR 003](docs/adr/003-layered-architecture.md) - layering and dependency inversion
 - [ADR 004](docs/adr/004-read-from-opencode-database.md) - why we read rather than store
 - [ADR 005](docs/adr/005-embedding-model-and-search.md) - embeddings and vector search
+- [ADR 006](docs/adr/006-chunked-indexing.md) - why sessions are chunked

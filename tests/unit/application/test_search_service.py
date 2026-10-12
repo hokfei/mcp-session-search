@@ -306,10 +306,11 @@ class TestEmbedderIntegration:
         service = service_with_sessions(count=1)
         await service.index_all()
 
-        stored = next(iter(service.store.records.values()))["embedding"]
+        chunks = next(iter(service.store.records.values()))["chunks"]
         query = keyword_vector("python").to_bytes()
 
-        assert len(stored) == len(query)
+        assert len(chunks) >= 1
+        assert all(len(c.embedding) == len(query) for c in chunks)
 
 
 class TestDependencyInversion:
@@ -328,6 +329,84 @@ class TestDependencyInversion:
         assert isinstance(service.store, VectorStore)
         assert isinstance(service.embedder, Embedder)
         assert isinstance(service.writer, AnswerWriter)
+
+
+class TestLongSessions:
+    """A session must be findable by content anywhere in it.
+
+    Indexing used to truncate to the first ~1500 characters, so everything
+    discussed later in a long session was unreachable. That made the most
+    valuable session - the one currently in progress - the least searchable.
+    """
+
+    @staticmethod
+    def long_session(marker: str, turns: int = 60) -> dict:
+        """A session whose distinguishing content is only at the very end."""
+        messages = [
+            make_message(f"f{i}", "ses_long", i, "user", f"routine filler text number {i}")
+            for i in range(turns)
+        ]
+        messages.append(make_message("needle", "ses_long", turns, "user", marker))
+        return {"ses_long": tuple(messages)}
+
+    async def test_finds_content_from_the_end_of_a_long_session(self):
+        messages = self.long_session("kubernetes ingress controller setup")
+        service = build_service([make_session("ses_long", "Long", message_count=61)], messages)
+
+        await service.index_all()
+        result = await service.search(
+            "kubernetes ingress controller", threshold=ANY_MATCH, auto_index=False
+        )
+
+        assert result.value.matches
+        assert result.value.matches[0].session_id == "ses_long"
+
+    async def test_a_long_session_produces_several_chunks(self):
+        messages = self.long_session("needle phrase here")
+        service = build_service([make_session("ses_long", "Long", message_count=61)], messages)
+
+        stats = await service.index_all()
+
+        assert stats.value.chunks > 1
+
+    async def test_a_short_session_produces_one_chunk(self):
+        messages = self.long_session("short", turns=1)
+        service = build_service([make_session("ses_long", "Short", message_count=2)], messages)
+
+        stats = await service.index_all()
+
+        assert stats.value.chunks == 1
+
+    async def test_each_chunk_is_embedded_separately(self):
+        embedder = FakeEmbedder()
+        messages = self.long_session("needle phrase here")
+        service = build_service(
+            [make_session("ses_long", "Long", message_count=61)], messages, embedder=embedder
+        )
+
+        await service.index_all()
+
+        assert len(embedder.calls) > 1
+
+    async def test_index_summary_reports_chunk_count(self):
+        messages = self.long_session("needle phrase here")
+        service = build_service([make_session("ses_long", "Long", message_count=61)], messages)
+
+        stats = await service.index_all()
+
+        assert "chunk" in stats.value.summary
+
+    async def test_the_matched_passage_reaches_the_answer(self):
+        """The model must see the text that matched, not the session's opening."""
+        messages = TestLongSessions.long_session("kubernetes ingress controller setup")
+        service = build_service([make_session("ses_long", "Long", message_count=61)], messages)
+
+        captured = _capturing_writer(service)
+        await service.search("kubernetes ingress controller", threshold=ANY_MATCH, auto_index=True)
+
+        assert captured, "synthesize should have been called"
+        assert "kubernetes ingress controller setup" in captured[0]
+        assert "routine filler text number 0" not in captured[0]
 
 
 @pytest.mark.parametrize("top_k", [1, 3, 5])
