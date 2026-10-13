@@ -158,19 +158,22 @@ class SessionSearchService:
         if not sessions:
             return Result.ok(IndexStats(indexed=0, skipped=0, found=0, chunks=0, pruned=pruned))
 
-        already: set[str] = set()
+        indexed_at: dict[str, int] = {}
         if not force:
-            ids_result = await self.store.get_indexed_ids()
-            already = ids_result.value if ids_result.is_ok else set()
+            times_result = await self.store.get_indexed_times()
+            indexed_at = times_result.value if times_result.is_ok else {}
 
         indexed = 0
         skipped = 0
         chunks_written = 0
 
         for session in sessions:
-            # Empty sessions carry no signal, and already-indexed ones are
-            # untouched unless force was requested.
-            if not session.has_content or (not force and session.id in already):
+            # Empty sessions carry no signal. An indexed session is skipped only
+            # while the index is as new as the source: a session that has kept
+            # receiving messages must be re-embedded, or its recent work stays
+            # unsearchable.
+            up_to_date = session.time_updated <= indexed_at.get(session.id, -1)
+            if not session.has_content or (not force and up_to_date):
                 skipped += 1
                 continue
 

@@ -239,6 +239,9 @@ class FakeStore:
     async def get_indexed_ids(self) -> Result[set[str], object]:
         return Result.ok(set(self.records))
 
+    async def get_indexed_times(self) -> Result[dict[str, int], object]:
+        return Result.ok({sid: r["time_updated"] for sid, r in self.records.items()})
+
     async def get_last_indexed_time(self) -> Result[int, object]:
         if not self.records:
             return Result.ok(0)
