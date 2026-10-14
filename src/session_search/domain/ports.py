@@ -113,6 +113,10 @@ class VectorStore(Protocol):
         """IDs of all indexed sessions."""
         ...
 
+    async def get_indexed_times(self) -> Result[dict[str, int], RepositoryError]:
+        """Map each indexed session ID to the time_updated it was indexed at."""
+        ...
+
     async def get_last_indexed_time(self) -> Result[int, RepositoryError]:
         """Newest time_updated across indexed sessions."""
         ...

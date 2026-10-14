@@ -331,6 +331,40 @@ class TestDependencyInversion:
         assert isinstance(service.writer, AnswerWriter)
 
 
+class TestUpdatedSessions:
+    """A session that keeps growing must be re-embedded, not skipped by ID."""
+
+    async def test_incremental_reindexes_a_session_that_gained_messages(self):
+        service = build_service(
+            [make_session("s1", time_updated=1_000)],
+            {"s1": (make_message("m1", "s1", 0, "user", "alpha topic"),)},
+        )
+        await service.index_all()
+
+        service.source.sessions = (make_session("s1", time_updated=2_000, message_count=2),)
+        service.source._messages["s1"] += (make_message("m2", "s1", 1, "user", "zebra topic"),)
+
+        result = await service.index_incremental()
+
+        assert result.value.indexed == 1
+        assert (await service.store.count()).value == 1
+        stored = service.store.records["s1"]
+        assert stored["time_updated"] == 2_000
+        assert any("zebra topic" in c.text for c in stored["chunks"])
+
+    async def test_an_unchanged_session_is_still_skipped(self):
+        service = build_service(
+            [make_session("s1", time_updated=1_000)],
+            {"s1": (make_message("m1", "s1", 0, "user", "alpha topic"),)},
+        )
+        await service.index_all()
+
+        result = await service.index_all()
+
+        assert result.value.indexed == 0
+        assert result.value.skipped == 1
+
+
 class TestLongSessions:
     """A session must be findable by content anywhere in it.
 

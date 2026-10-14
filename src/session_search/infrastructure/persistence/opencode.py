@@ -197,9 +197,7 @@ class OpenCodeReader:
                     legacy = False
 
                 messages = [
-                    m
-                    for m in (self._to_message(r, conn if legacy else None) for r in rows)
-                    if m
+                    m for m in (self._to_message(r, conn if legacy else None) for r in rows) if m
                 ]
                 return Result.ok(tuple(messages))
 

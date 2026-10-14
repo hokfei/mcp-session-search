@@ -269,6 +269,15 @@ class VectorIndex:
         except Exception as e:
             return Result.err(RepositoryError(f"Failed to get indexed IDs: {e}", e))
 
+    async def get_indexed_times(self) -> Result[dict[str, int], RepositoryError]:
+        """Map each indexed session ID to the time_updated it was indexed at."""
+        try:
+            with self._conn() as conn:
+                rows = conn.execute("SELECT session_id, time_updated FROM indexed_sessions")
+                return Result.ok({r["session_id"]: r["time_updated"] for r in rows})
+        except Exception as e:
+            return Result.err(RepositoryError(f"Failed to get indexed times: {e}", e))
+
     async def get_last_indexed_time(self) -> Result[int, RepositoryError]:
         """Newest time_updated across indexed sessions (0 when empty)."""
         try:

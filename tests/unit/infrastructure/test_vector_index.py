@@ -226,6 +226,14 @@ class TestWatermark:
 
         assert (await index.get_indexed_ids()).value == {"a", "b"}
 
+    async def test_maps_each_id_to_its_indexed_time(self, index_database: Path):
+        index = VectorIndex(index_database)
+        await store(index, "a", [[1.0, 0.0]], time_updated=100)
+        await store(index, "b", [[1.0, 0.0]], time_updated=200)
+        await store(index, "a", [[1.0, 0.0]], time_updated=300)
+
+        assert (await index.get_indexed_times()).value == {"a": 300, "b": 200}
+
 
 class TestMigration:
     def test_migrates_a_pre_chunking_index(self, tmp_path: Path):

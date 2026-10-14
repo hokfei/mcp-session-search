@@ -140,18 +140,14 @@ class TestGetSessionMessages:
         assert result.value[0].text == "what does the parser do"
         assert result.value[1].text == "it reads the legacy message table"
 
-    async def test_legacy_parts_exclude_reasoning_and_tool_calls(
-        self, legacy_part_database: Path
-    ):
+    async def test_legacy_parts_exclude_reasoning_and_tool_calls(self, legacy_part_database: Path):
         """Only `text` parts are prose; the rest is machinery."""
         result = await OpenCodeReader(legacy_part_database).get_session_messages("ses_parts")
 
         assert not any("thinking about the parser" in m.text for m in result.value)
         assert not any("step-start" in m.text for m in result.value)
 
-    async def test_legacy_session_readable_when_v2_tables_also_exist(
-        self, mixed_database: Path
-    ):
+    async def test_legacy_session_readable_when_v2_tables_also_exist(self, mixed_database: Path):
         """A session only in the legacy table must not be shadowed by v2 tables."""
         result = await OpenCodeReader(mixed_database).get_session_messages("ses_old")
 
